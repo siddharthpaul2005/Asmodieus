@@ -65,3 +65,18 @@ Step,Module / Milestone,Status
 11,FastAPI Server (Local Run),Pending
 12,Render Deployment,Pending
 13,README & Submission Writeup,Pending
+
+
+
+
+I am Siddharth I make changes in 
+
+src/chunking/, src/embedding/, src/retrieval/, src/answering/, benchmarks/. 
+
+Akshat - src/guardrails/, src/stt
+
+mradul only edits src/harness.py, server/
+
+and then whoever to do what is to be needed
+
+and remember please dont fuck it up
