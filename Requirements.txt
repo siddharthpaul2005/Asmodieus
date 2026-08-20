@@ -1,0 +1,6 @@
+# STT dependencies
+sarvamai
+websockets
+python-dotenv
+sounddevice
+numpy
