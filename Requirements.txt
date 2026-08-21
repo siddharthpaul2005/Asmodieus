@@ -4,3 +4,6 @@ websockets
 python-dotenv
 sounddevice
 numpy
+fastapi
+uvicorn
+httpx
