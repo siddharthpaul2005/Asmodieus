@@ -28,8 +28,10 @@ try:
 except ImportError:
     Pinecone = None
 
-META_PATH = "data/processed/chunk_meta.jsonl"
-CORPUS_PATH = "data/processed/corpus.jsonl"
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+META_PATH = str(PROJECT_ROOT / "data" / "processed" / "chunk_meta.jsonl")
+CORPUS_PATH = str(PROJECT_ROOT / "data" / "processed" / "corpus.jsonl")
 
 # Dense score floor for fusion filtering
 DENSE_FLOOR_FOR_FUSION = 0.70

@@ -11,9 +11,12 @@ import os
 import re
 import bm25s
 
-META_PATH = "data/processed/chunk_meta.jsonl"
-CORPUS_PATH = "data/processed/corpus.jsonl"
-INDEX_DIR = "data/processed/bm25s_index"
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+META_PATH = str(PROJECT_ROOT / "data" / "processed" / "chunk_meta.jsonl")
+CORPUS_PATH = str(PROJECT_ROOT / "data" / "processed" / "corpus.jsonl")
+INDEX_DIR = str(PROJECT_ROOT / "data" / "processed" / "bm25s_index")
 
 import string
 def _strip_punct(text: str) -> str:
