@@ -44,6 +44,27 @@ def get_guardrails():
     return FileResponse(guardrails_path)
 
 
+from pydantic import BaseModel
+import time
+
+class AskRequest(BaseModel):
+    query: str
+    lang: str = "eng"
+
+@app.post("/api/ask")
+def ask_endpoint(req: AskRequest):
+    """Retrieves context and generates an extractive answer using Pinecone + BM25."""
+    try:
+        from src.answering.extractive import answer
+        t0 = time.perf_counter()
+        result = answer(req.query, lang=req.lang)
+        t1 = time.perf_counter()
+        result["latency_ms"] = (t1 - t0) * 1000
+        return JSONResponse(content=result)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.websocket("/ws/stt")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()

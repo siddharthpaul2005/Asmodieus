@@ -35,7 +35,7 @@ def answer(query: str, k: int = 5, candidate_k: int = 20) -> dict:
     context = top.get("context_text") or top["text"]
 
     return {
-        "answer": f"Based on the passage: {context}",
+        "answer": f"{context}",
         "cited_chunk_ids": [c["chunk_id"] for c in chunks],
         "confidence": 1.0,  # no real scoring model yet — RRF gives rank not calibrated confidence
         "refused": False,

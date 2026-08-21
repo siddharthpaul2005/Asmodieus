@@ -34,10 +34,10 @@ _NO_INFO_MSG = {
 }
 
 _ANSWER_PREFIX = {
-    "eng": "Based on the passage: ",
-    "hin": "अनुच्छेद के अनुसार: ",
-    "ben": "অনুচ্ছেদ অনুসারে: ",
-    "guj": "ફકરા મુજબ: ",
+    "eng": "",
+    "hin": "",
+    "ben": "",
+    "guj": "",
 }
 
 _STOPWORDS = {

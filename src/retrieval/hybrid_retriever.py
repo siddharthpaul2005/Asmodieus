@@ -55,25 +55,9 @@ def _get_pinecone_index():
 def _load_all():
     global _chunk_meta_map, _bm25, _bm25_chunk_ids
     if _chunk_meta_map is None:
+        # We no longer read corpus.jsonl here.
+        # Pinecone dense_search automatically populates _chunk_meta_map with hit.fields!
         _chunk_meta_map = {}
-        file_path = META_PATH if os.path.exists(META_PATH) else CORPUS_PATH
-        if os.path.exists(file_path):
-            with open(file_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-                    row = json.loads(line)
-                    cid = str(row.get("chunk_id") or row.get("idx"))
-                    _chunk_meta_map[cid] = {
-                        "idx": cid,
-                        "chunk_id": cid,
-                        "source_chunk_id": cid,
-                        "text": row.get("text", ""),
-                        "context_text": row.get("context_text", row.get("text", "")),
-                        "strategy": row.get("strategy", "passage"),
-                        "language": row.get("language", "eng"),
-                    }
-
         _bm25, _bm25_chunk_ids = load_bm25()
 
 
@@ -139,6 +123,9 @@ def rrf_fuse(ranked_lists: list[list[str]], k_const: int = 60, top_k: int = 5) -
     return fused[:top_k]
 
 
+import functools
+
+@functools.lru_cache(maxsize=100)
 def retrieve(
     query: str,
     k: int = 5,

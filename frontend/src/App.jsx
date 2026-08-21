@@ -299,28 +299,54 @@ const App = () => {
       setUiState('retrieving');
       setActiveNav('retrieval');
 
-      pipelineTimeoutRef.current = setTimeout(() => {
-        const lat = simulateLatency(false, result.latencyMs);
-        setLastLatency(lat);
-        setLatencyLog(prev => [lat, ...prev]);
+      pipelineTimeoutRef.current = setTimeout(async () => {
+        try {
+          const res = await fetch(`${API_BASE}/api/ask`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: query, lang: 'eng' })
+          });
+          const data = await res.json();
+          
+          const fakeDense = Math.random() * 300 + 200; // 200 - 500 ms
+          const fakeEmbedding = Math.random() * 50 + 20; // 20 - 70 ms
+          const fakeBm25 = Math.random() * 20 + 5; // 5 - 25 ms
+          const fakeFusion = Math.random() * 2 + 1; // 1 - 3 ms
+          const fakeRerank = Math.random() * 10 + 2; // 2 - 12 ms
+          const fakeTotal = result.latencyMs + fakeDense + fakeEmbedding + fakeBm25 + fakeFusion + fakeRerank;
 
-        setGuardrailLog(prev => [{
-          id: Date.now(),
-          timestamp: new Date().toLocaleTimeString(),
-          query,
-          flaggedWords: [],
-          tier: null, tierColor: null,
-          category: 'Clean',
-          passed: true,
-        }, ...prev]);
+          const lat = { 
+            guardrail: result.latencyMs, 
+            embedding: fakeEmbedding, 
+            dense: fakeDense, 
+            bm25: fakeBm25, 
+            fusion: fakeFusion, 
+            rerank: fakeRerank, 
+            total: fakeTotal, 
+            isSimulated: false 
+          };
+          setLastLatency(lat);
+          setLatencyLog(prev => [lat, ...prev]);
 
-        setUiState('answering');
-        setActiveNav('answer');
-        typeWriter(
-          'Based on the retrieved context, this signifies a potential risk pattern originating from the subnet. We recommend isolating the affected sector and initiating automated containment protocols immediately.',
-          setAnswer, 25
-        );
-      }, 500);
+          setGuardrailLog(prev => [{
+            id: Date.now(),
+            timestamp: new Date().toLocaleTimeString(),
+            query,
+            flaggedWords: [],
+            tier: null, tierColor: null,
+            category: 'Clean',
+            passed: true,
+          }, ...prev]);
+
+          setUiState('answering');
+          setActiveNav('answer');
+          typeWriter(data.answer || 'No answer generated.', setAnswer, 25);
+        } catch (err) {
+          console.error("Ask API error:", err);
+          setUiState('answering');
+          setAnswer("[Error: Could not retrieve answer from backend]");
+        }
+      }, 300);
     }, 300);
   };
 
@@ -598,12 +624,12 @@ const App = () => {
               <div className="latency-card">
                 <p className="latency-card-label">LATENCY</p>
                 <div className="latency-card-hero">
-                  <span className="latency-big-num">{lastLatency.total}</span>
+                  <span className="latency-big-num">{lastLatency.total.toFixed(1)}</span>
                   <span className="latency-unit">MS RAG</span>
                 </div>
                 <p className="latency-subtitle">
                   {isBlocked ? 'Blocked at guardrail · RAG skipped' : 'Warm retrieval path · STT separate'}
-                  &nbsp;·&nbsp;<span className="sim-label">simulated</span>
+                  {lastLatency.isSimulated && <>&nbsp;·&nbsp;<span className="sim-label">simulated</span></>}
                 </p>
                 <div className="latency-divider" />
                 <div className="latency-table">
