@@ -8,61 +8,98 @@ const App = () => {
   const [answer, setAnswer] = useState('');
   const [activeNav, setActiveNav] = useState('input');
   const [showInfo, setShowInfo] = useState(false);
+  const [isTranscriptExpanded, setIsTranscriptExpanded] = useState(false);
 
-  const recognitionRef = useRef(null);
+  const wsRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const audioStreamRef = useRef(null);
+  const processorRef = useRef(null);
   const pipelineTimeoutRef = useRef(null);
   const typeWriterTimeoutRef = useRef(null);
 
-  useEffect(() => {
-    // Check for Speech API support (Web Speech API)
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const stopRecording = () => {
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach(track => track.stop());
+      audioStreamRef.current = null;
+    }
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.close();
+    }
+  };
 
-    if (SpeechRecognition) {
-      const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
 
-      recognition.onstart = () => {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      audioContextRef.current = audioContext;
+      
+      // Load our worklet from the public folder
+      await audioContext.audioWorklet.addModule('/audio-worklet.js');
+      
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = new AudioWorkletNode(audioContext, 'pcm-downsampler');
+      processorRef.current = processor;
+
+      // Connect WebSocket to FastAPI backend
+      const ws = new WebSocket('ws://localhost:8000/ws/stt');
+      wsRef.current = ws;
+
+      ws.onopen = () => {
         setUiState('listening');
         setActiveNav('input');
-      };
-
-      recognition.onresult = (event) => {
-        const current = event.resultIndex;
-        const currentTranscript = event.results[current][0].transcript;
-
-        setTranscript(currentTranscript);
-        setUiState((prev) => (prev === 'listening' ? 'transcribing' : prev));
-      };
-
-      recognition.onspeechend = () => {
-        recognition.stop();
-      };
-
-      recognition.onend = () => {
-        setUiState((currentUiState) => {
-          if (currentUiState === 'listening' || currentUiState === 'transcribing') {
-            // Need to get latest transcript from ref or state if possible, but React closure might have old state
-            // It's handled by calling runPipelineSimulation in a useEffect watching for the end, or here.
-            // We'll rely on the transcript state.
-            return 'ready';
+        
+        // Process audio and send to websocket
+        processor.port.onmessage = (e) => {
+          if (ws.readyState === WebSocket.OPEN) {
+             ws.send(e.data); // Int16Array Buffer
           }
-          return currentUiState;
-        });
+        };
+        source.connect(processor);
+        // Required in some browsers to keep the node active
+        processor.connect(audioContext.destination); 
       };
 
-      recognition.onerror = (event) => {
-        console.error('Speech recognition error', event.error);
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.text) {
+          setTranscript(data.text);
+          if (data.is_partial) {
+            setUiState('transcribing');
+          } else {
+            // It's a final transcript, stop recording and trigger pipeline
+            stopRecording();
+            setUiState('ready'); 
+          }
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error("Websocket error", err);
+        stopRecording();
         simulateFullInteraction();
       };
 
-      recognitionRef.current = recognition;
+    } catch (e) {
+      console.error("Mic access denied or error:", e);
+      simulateFullInteraction();
     }
+  };
 
+  useEffect(() => {
     return () => {
       clearTimeout(pipelineTimeoutRef.current);
       clearTimeout(typeWriterTimeoutRef.current);
+      stopRecording();
     };
   }, []);
 
@@ -80,6 +117,7 @@ const App = () => {
     setAnswer('');
     setUiState('ready');
     setActiveNav('input');
+    setIsTranscriptExpanded(false);
   };
 
   const typeWriter = (text, setFunc, speed = 30) => {
@@ -137,19 +175,11 @@ const App = () => {
 
   const handleMicClick = () => {
     if (uiState === 'listening') {
-      if (recognitionRef.current) recognitionRef.current.stop();
+      stopRecording();
       resetUI();
     } else {
       resetUI();
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.start();
-        } catch (e) {
-          simulateFullInteraction();
-        }
-      } else {
-        simulateFullInteraction();
-      }
+      startRecording();
     }
   };
 
@@ -214,12 +244,15 @@ const App = () => {
             </div>
 
             <div
-              className={`transcript-box ${['ready', 'listening'].includes(uiState) ? 'hidden' : ''}`}
+              className={`transcript-box ${['ready', 'listening'].includes(uiState) ? 'hidden' : ''} ${(uiState === 'answering' && !isTranscriptExpanded) ? 'compact' : ''} ${uiState === 'answering' ? 'clickable' : ''}`}
               style={{
-                borderColor: uiState === 'retrieving' ? 'var(--accent)' : (uiState === 'answering' ? 'var(--glass-border)' : 'var(--glass-border)'),
-                boxShadow: uiState === 'retrieving' ? '0 0 30px rgba(255, 69, 0, 0.2)' : (uiState === 'answering' ? 'none' : '0 10px 40px rgba(0,0,0,0.3)'),
-                opacity: uiState === 'answering' ? 0.3 : 1,
-                transform: uiState === 'answering' ? 'translateY(-30px) scale(0.95)' : 'translateY(0)'
+                borderColor: uiState === 'retrieving' ? 'var(--accent)' : 'var(--glass-border)',
+                boxShadow: uiState === 'retrieving' ? '0 0 30px rgba(255, 69, 0, 0.2)' : '0 10px 40px rgba(0,0,0,0.3)',
+              }}
+              onClick={() => {
+                if (uiState === 'answering') {
+                  setIsTranscriptExpanded(!isTranscriptExpanded);
+                }
               }}
             >
               <div className="label-row">
@@ -227,6 +260,11 @@ const App = () => {
                 <span className="badge">Speech-to-Text</span>
               </div>
               <p>{transcript}</p>
+              {uiState === 'answering' && (
+                <div className="expand-hint">
+                  {isTranscriptExpanded ? 'Tap to collapse' : 'Tap to expand'}
+                </div>
+              )}
             </div>
 
             <div className={`answer-box ${uiState !== 'answering' ? 'hidden' : ''}`}>
