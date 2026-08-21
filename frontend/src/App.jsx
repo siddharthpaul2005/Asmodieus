@@ -85,6 +85,9 @@ function simulateLatency(blocked, guardrailMs) {
   return { guardrail: g, embedding: e, dense: d, bm25: b, fusion: f, rerank: r, total: parseFloat((g + e + d + b + f + r).toFixed(1)), isSimulated: true };
 }
 
+const API_BASE = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
+const WS_BASE = import.meta.env.VITE_WS_URL || API_BASE.replace(/^http/, 'ws');
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 const App = () => {
   const [uiState, setUiState] = useState('ready');
@@ -112,8 +115,7 @@ const App = () => {
 
   // ── Fetch dynamic guardrails ─────────────────────────────────────────────────
   useEffect(() => {
-    fetch('http://localhost:8000/api/guardrails')
-      .then(res => res.json())
+    fetch(`${API_BASE}/api/guardrails`)
       .then(data => {
         const parsedTiers = {};
         for (const [tier, obj] of Object.entries(data)) {
@@ -162,7 +164,7 @@ const App = () => {
       const source = audioContext.createMediaStreamSource(stream);
       const processor = new AudioWorkletNode(audioContext, 'pcm-downsampler');
       processorRef.current = processor;
-      const ws = new WebSocket('ws://localhost:8000/ws/stt');
+      const ws = new WebSocket(`${WS_BASE}/ws/stt`);
       wsRef.current = ws;
 
       ws.onopen = () => {

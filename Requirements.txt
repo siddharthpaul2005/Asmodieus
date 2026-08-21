@@ -1,16 +1,13 @@
-# STT dependencies
+# STT & FastAPI dependencies
 sarvamai
 websockets
 python-dotenv
-sounddevice
 numpy
 fastapi
 uvicorn
 httpx
 
-# Chunking / Embedding / Retrieval
-sentence-transformers
-hnswlib
-rank_bm25
-
-torch 
+# Vector DB & Retrieval (Lightweight - Pinecone + BM25s)
+pinecone
+bm25s
+duckdb

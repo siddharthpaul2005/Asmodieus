@@ -1,34 +1,21 @@
 """
 src/retrieval/hybrid_retriever.py
-Step 5b — Hybrid dense + sparse retrieval with Reciprocal Rank Fusion.
+Step 5b — Hybrid dense + sparse retrieval with Reciprocal Rank Fusion via Pinecone Integrated Search.
 
-Fixes from review:
-- Removed a dead/duplicate `retrieve()` that shadowed the real one and
-  referenced undefined names (_existing_fusion_logic, chunk_meta). Because
-  it was defined first and Python lets later defs silently overwrite
-  earlier ones, that "language-aware" version NEVER RAN — language
-  filtering was doing nothing at all, for any query.
-- Language filtering now actually happens in the one real `retrieve()`,
-  using same-language chunks first and backfilling with English if there
-  aren't enough.
-- Dense cosine score is now captured alongside RRF fusion and attached to
-  each returned chunk dict as `_dense_score`, so extractive.py can gate
-  and report confidence on the chunk it's ACTUALLY returning, instead of
-  re-fetching a possibly-different chunk's score separately.
-- Fused candidates with near-zero dense support (i.e. pure BM25 lexical
-  flukes with no real semantic backing) are filtered out before being
-  returned, unless doing so would leave fewer than k results.
+- Uses Pinecone Integrated Search (multilingual-e5-large) for dense retrieval.
+- Uses bm25s in-process for sparse lexical retrieval.
+- Fuses candidates using Reciprocal Rank Fusion (RRF).
+- Preserves score thresholds and extractive metadata contract.
 """
 import json
 import os
 import sys
 import time
+from dotenv import load_dotenv
 
-import hnswlib
-import bm25s
+load_dotenv()
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from src.embedding.embedder import embed_query
 from src.retrieval.bm25_index import load_bm25, tokenize
 
 try:
@@ -36,62 +23,115 @@ try:
 except ImportError:
     detect_language = None
 
-INDEX_PATH = "data/processed/index.bin"
+try:
+    from pinecone import Pinecone
+except ImportError:
+    Pinecone = None
+
 META_PATH = "data/processed/chunk_meta.jsonl"
-DIM = 384
+CORPUS_PATH = "data/processed/corpus.jsonl"
 
-# Below this dense cosine score, a fused-in candidate is treated as a
-# lexical-only fluke (BM25 loved it, dense found nothing there).
-DENSE_FLOOR_FOR_FUSION = 0.75
+# Dense score floor for fusion filtering
+DENSE_FLOOR_FOR_FUSION = 0.70
 
-_hnsw_index = None
-_chunk_meta = None
+_pinecone_index = None
+_chunk_meta_map = None
 _bm25 = None
 _bm25_chunk_ids = None
 
 
-def _load_all():
-    global _hnsw_index, _chunk_meta, _bm25, _bm25_chunk_ids
-    if _hnsw_index is None:
-        _chunk_meta = []
-        with open(META_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                _chunk_meta.append(json.loads(line))
+def _get_pinecone_index():
+    global _pinecone_index
+    if _pinecone_index is None:
+        api_key = os.getenv("PINECONE_API_KEY")
+        index_name = os.getenv("PINECONE_INDEX_NAME", "asmodieus")
+        if not api_key:
+            raise ValueError("PINECONE_API_KEY environment variable is not set.")
+        pc = Pinecone(api_key=api_key)
+        _pinecone_index = pc.Index(index_name)
+    return _pinecone_index
 
-        _hnsw_index = hnswlib.Index(space="cosine", dim=DIM)
-        _hnsw_index.load_index(INDEX_PATH, max_elements=len(_chunk_meta))
-        _hnsw_index.set_ef(50)
+
+def _load_all():
+    global _chunk_meta_map, _bm25, _bm25_chunk_ids
+    if _chunk_meta_map is None:
+        _chunk_meta_map = {}
+        file_path = META_PATH if os.path.exists(META_PATH) else CORPUS_PATH
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    cid = str(row.get("chunk_id") or row.get("idx"))
+                    _chunk_meta_map[cid] = {
+                        "idx": cid,
+                        "chunk_id": cid,
+                        "source_chunk_id": cid,
+                        "text": row.get("text", ""),
+                        "context_text": row.get("context_text", row.get("text", "")),
+                        "strategy": row.get("strategy", "passage"),
+                        "language": row.get("language", "eng"),
+                    }
 
         _bm25, _bm25_chunk_ids = load_bm25()
 
 
 def dense_search(query: str, k: int = 20):
-    """Returns (ranked_idx_list, {idx: cosine_score}). Score dict lets
-    callers judge candidate quality, not just rank position."""
+    """Searches Pinecone using integrated embedding."""
     _load_all()
-    te0 = time.perf_counter()
-    qvec = embed_query(query).reshape(1, -1)
-    te1 = time.perf_counter()
-    labels, distances = _hnsw_index.knn_query(qvec, k=k)
-    te2 = time.perf_counter()
-    print(f"    embed_query: {(te1 - te0) * 1000:.2f}ms | hnsw_knn: {(te2 - te1) * 1000:.2f}ms")
+    index = _get_pinecone_index()
+    t0 = time.perf_counter()
+    res = index.search(
+        namespace=os.getenv("PINECONE_NAMESPACE", "default"),
+        top_k=k,
+        inputs={"text": query}
+    )
+    t1 = time.perf_counter()
+    if os.getenv("VERBOSE", "0") == "1":
+        print(f"    pinecone_search: {(t1 - t0) * 1000:.2f}ms")
 
-    ranked = labels[0].tolist()
-    # hnswlib cosine space returns distance = 1 - cosine_sim
-    scores = {idx: 1.0 - float(dist) for idx, dist in zip(ranked, distances[0].tolist())}
-    return ranked, scores
+    hits = getattr(res.result, "hits", []) if hasattr(res, "result") else getattr(res, "hits", [])
+    ranked_ids = []
+    scores = {}
+
+    for hit in hits:
+        cid = str(hit.id)
+        score = float(getattr(hit, "score", 0.0))
+        ranked_ids.append(cid)
+        scores[cid] = score
+
+        # If not present in local metadata map, populate from Pinecone fields
+        if cid not in _chunk_meta_map:
+            fields = getattr(hit, "fields", {}) or {}
+            _chunk_meta_map[cid] = {
+                "idx": cid,
+                "chunk_id": cid,
+                "source_chunk_id": cid,
+                "text": fields.get("text", ""),
+                "context_text": fields.get("text", ""),
+                "strategy": fields.get("strategy", "passage"),
+                "language": fields.get("language", "eng"),
+            }
+
+    return ranked_ids, scores
 
 
-def sparse_search(query: str, k: int = 20) -> list[int]:
+def sparse_search(query: str, k: int = 20) -> list[str]:
     _load_all()
     tokens = tokenize(query)
-    results, scores = _bm25.retrieve(bm25s.tokenize([" ".join(tokens)], show_progress=False), k=k)
-    top_indices = results[0]
-    return [_bm25_chunk_ids[i] for i in top_indices]
+    results, scores = _bm25.retrieve(bm25s_tokenize(tokens), k=k) if hasattr(_bm25, "retrieve") else ([], [])
+    top_indices = results[0] if len(results) > 0 else []
+    return [str(_bm25_chunk_ids[i]) for i in top_indices if i < len(_bm25_chunk_ids)]
 
 
-def rrf_fuse(ranked_lists: list[list[int]], k_const: int = 60, top_k: int = 5) -> list[int]:
-    scores: dict[int, float] = {}
+def bm25s_tokenize(tokens: list[str]):
+    import bm25s
+    return bm25s.tokenize([" ".join(tokens)], show_progress=False)
+
+
+def rrf_fuse(ranked_lists: list[list[str]], k_const: int = 60, top_k: int = 5) -> list[str]:
+    scores: dict[str, float] = {}
     for ranked in ranked_lists:
         for rank, idx in enumerate(ranked):
             scores[idx] = scores.get(idx, 0.0) + 1.0 / (k_const + rank)
@@ -106,12 +146,6 @@ def retrieve(
     verbose: bool = False,
     lang: str | None = None,
 ) -> list[dict]:
-    """
-    lang: language code of the query. Pass this in from your STT pipeline
-    if it already knows the language (more reliable than re-detecting from
-    text here). If given, same-language chunks are preferred, backfilled
-    with English if there aren't enough same-language results.
-    """
     _load_all()
 
     if lang is None and detect_language is not None:
@@ -127,8 +161,6 @@ def retrieve(
     sparse_ranked = sparse_search(query, k=candidate_k)
     t2 = time.perf_counter()
 
-    # over-fetch at fusion time (candidate_k, not k) so language filtering
-    # downstream has enough candidates to work with
     fused_idxs = rrf_fuse([dense_ranked, sparse_ranked], top_k=candidate_k)
     t3 = time.perf_counter()
 
@@ -137,14 +169,16 @@ def retrieve(
         print(f"  sparse_search: {(t2 - t1) * 1000:.2f}ms")
         print(f"  rrf_fuse:      {(t3 - t2) * 1000:.2f}ms")
 
-    # drop fused candidates with near-zero dense support (pure lexical
-    # flukes) — but never let this filtering leave us with fewer than k
     strong = [idx for idx in fused_idxs if dense_scores.get(idx, 0.0) >= DENSE_FLOOR_FOR_FUSION]
     ordered = strong if len(strong) >= k else fused_idxs
 
     results = []
     for idx in ordered:
-        meta = dict(_chunk_meta[idx])
+        meta = dict(_chunk_meta_map.get(idx, {
+            "chunk_id": idx,
+            "text": "",
+            "language": "eng"
+        }))
         meta["_dense_score"] = dense_scores.get(idx, 0.0)
         results.append(meta)
 
@@ -156,35 +190,23 @@ def retrieve(
         combined = same_lang + backfill
         if combined:
             return combined[:k]
-        # nothing in target language or English survived filtering —
-        # fall back to unfiltered ranked results rather than returning nothing
         return results[:k]
 
     return results[:k]
 
 
-def _print_result(idx: int):
-    r = _chunk_meta[idx]
-    print(f"[{r['strategy']}] {r['text'][:120]}")
-
-
 def main():
-    print("Warming up (loading model + indexes)...")
-    from src.embedding.embedder import get_model
-    get_model()
+    print("Warming up Pinecone + BM25...")
     _load_all()
     print("Warm.")
 
     test_query = "What did the QPR manager say about transfers?"
 
     print("\n--- dense only ---")
-    ranked, _ = dense_search(test_query, k=5)
+    ranked, scores = dense_search(test_query, k=5)
     for idx in ranked:
-        _print_result(idx)
-
-    print("\n--- sparse only ---")
-    for idx in sparse_search(test_query, k=5):
-        _print_result(idx)
+        r = _chunk_meta_map.get(idx, {})
+        print(f"[{scores.get(idx, 0):.3f}] {r.get('text', '')[:120]}")
 
     print("\n--- fused (timed, per-stage) ---")
     t0 = time.perf_counter()
@@ -192,7 +214,7 @@ def main():
     t1 = time.perf_counter()
     print(f"Total: {(t1 - t0) * 1000:.2f}ms")
     for r in results:
-        print(f"[{r['strategy']}] (dense={r['_dense_score']:.3f}) {r['text'][:120]}")
+        print(f"[{r.get('strategy', 'passage')}] (dense={r['_dense_score']:.3f}) {r.get('text', '')[:120]}")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ import re
 import bm25s
 
 META_PATH = "data/processed/chunk_meta.jsonl"
+CORPUS_PATH = "data/processed/corpus.jsonl"
 INDEX_DIR = "data/processed/bm25s_index"
 
 import string
@@ -33,13 +34,18 @@ def tokenize(text: str) -> list[str]:
     return [t for t in words if t not in _STOPWORDS]
 
 def build_bm25():
+    file_path = META_PATH if os.path.exists(META_PATH) else CORPUS_PATH
     chunk_ids = []
     corpus_tokens = []
-    with open(META_PATH, "r", encoding="utf-8") as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
+            if not line.strip():
+                continue
             row = json.loads(line)
-            chunk_ids.append(row["idx"])
+            cid = row.get("chunk_id") or str(row.get("idx"))
+            chunk_ids.append(cid)
             corpus_tokens.append(tokenize(row["text"]))
+
 
     retriever = bm25s.BM25()
     retriever.index(corpus_tokens)
