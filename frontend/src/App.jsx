@@ -116,6 +116,7 @@ const App = () => {
   // ── Fetch dynamic guardrails ─────────────────────────────────────────────────
   useEffect(() => {
     fetch(`${API_BASE}/api/guardrails`)
+      .then(res => res.json())
       .then(data => {
         const parsedTiers = {};
         for (const [tier, obj] of Object.entries(data)) {
