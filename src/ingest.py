@@ -1,30 +1,19 @@
 '''
+Step 2.5 — Ingest MSMARCO-XI, multi-language.
 
-This script does the subsample + dedupe + eval-set creation from hintrain.parquet (English fields), producing the actual working corpus for everything downstream.
+Reads N rows from each requested language's cached parquet file,
+extracts BOTH the English fields (Eng_Query/Eng_Answer/English_passages)
+AND the native-language fields (query/Answer/Translated_passages),
+tags every passage with a `language` code, dedupes into one flat
+corpus across all requested languages, and writes:
 
-What it needs to do:
-
-Read N rows from the parquet (English fields only, per our decision).
-From each row, pull out the 10 passages + the is_selected mask + the query + the gold answer.
-Dedupe passages — same passage text often appears across many different rows as a distractor, we only want to store it once, but remember every query that treats it as gold.
-Save two artifacts:
-corpus.jsonl — every unique passage, with a stable chunk_id, ready for step 3 (chunking) and step 4 (embedding).
-eval_queries.jsonl — every query, its gold chunk_id(s), and the gold answer text — this is what step 9 (latency benchmarking) and retrieval-accuracy testing will run against.
-'''
-
-"""
-Step 2.5 — Ingest MSMARCO-XI (Hindi-split file, English fields).
-
-Reads N rows from the cached hintrain.parquet, extracts the English
-query/passages/answer fields, dedupes passages into a flat corpus,
-and writes two files:
-
-  data/processed/corpus.jsonl        -> one line per unique passage
-  data/processed/eval_queries.jsonl  -> one line per query, with gold chunk_id(s)
+  data/processed/corpus.jsonl        -> one line per unique passage, tagged with `language`
+  data/processed/eval_queries.jsonl  -> one line per query (both English AND native-language
+                                          variants of the same underlying query, each tagged)
 
 Run:
-  python src/ingest.py --n-rows 5000
-"""
+  python src/ingest.py --languages eng,hin,ben,guj --n-rows 5000
+'''
 
 import argparse
 import hashlib
@@ -33,114 +22,173 @@ import os
 
 import duckdb
 
+# filename prefix per language, matching your cached snapshot filenames exactly.
+# "eng" is not a real MSMARCO-XI file — English content is pulled from the
+# Eng_Query/Eng_Answer/English_passages fields present in EVERY language file,
+# so we just use hin's file as the English source (any file would do — English
+# content is identical/duplicated across all language files).
+LANG_FILES = {
+    "hin": "hintrain.parquet",
+    "ben": "bentrain.parquet",
+    "guj": "gujtrain.parquet",
+    "tam": "tamtrain.parquet",
+    "kan": "kantrain.parquet",
+    "mal": "maltrain.parquet",
+    "mar": "martrain.parquet",
+    "nep": "neptrain.parquet",
+    "ori": "oritrain.parquet",
+    "pan": "pantrain.parquet",
+    "san": "santrain.parquet",
+    "urd": "urdtrain.parquet",
+    "asm": "asmtrain.parquet",
+}
 
-# Update this if your cached path differs — copy it from your
-# hf_hub_download output.
-DEFAULT_PARQUET_PATH = (
+PARQUET_DIR = (
     r"C:\Users\pauls\.cache\huggingface\hub\datasets--ai4bharat--MSMARCO-XI"
-    r"\snapshots\bf5cdc1f26e581e519018e434db14edd1b77602b\train\hintrain.parquet"
+    r"\snapshots\bf5cdc1f26e581e519018e434db14edd1b77602b\train"
 )
 
 
 def make_chunk_id(text: str) -> str:
-    """Stable id for a passage based on its content, so the same
-    passage text always maps to the same chunk_id even across rows."""
     return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:12]
+
+
+def ingest_language(con, lang_code: str, n_rows: int, seed: int,
+                     corpus: dict, eval_queries: list, include_english: bool):
+    """
+    Pulls n_rows from lang_code's parquet file. Always extracts the
+    native-language fields (query/Answer/Translated_passages), tagged
+    `language=lang_code`. If include_english is True (only done once,
+    for the first language processed), ALSO extracts Eng_Query/Eng_Answer/
+    English_passages tagged `language=eng`, since English content is
+    duplicated identically across every language file.
+    """
+    path = os.path.join(PARQUET_DIR, LANG_FILES[lang_code])
+    query = f"""
+        SELECT
+            query_id,
+            query               AS native_query,
+            Answer               AS native_answer,
+            Eng_Query,
+            Eng_Answer,
+            query_type,
+            passages.Translated_passages AS native_passages,
+            passages.English_passages    AS eng_passages,
+            passages.is_selected         AS is_selected
+        FROM read_parquet('{path.replace(chr(92), "/")}')
+        USING SAMPLE {n_rows} (reservoir, {seed})
+    """
+    rows = con.execute(query).fetchall()
+    col_names = [d[0] for d in con.description]
+
+    n_native = 0
+    n_eng = 0
+
+    for row in rows:
+        r = dict(zip(col_names, row))
+        is_selected = r["is_selected"] or []
+
+        # --- native-language extraction ---
+        native_query = (r["native_query"] or "").strip()
+        native_answer = (r["native_answer"] or "").strip()
+        native_passages = r["native_passages"] or []
+
+        if native_query and native_passages:
+            gold_ids, row_ids = [], []
+            for text, flag in zip(native_passages, is_selected):
+                if not text or not text.strip():
+                    continue
+                cid = make_chunk_id(text)
+                corpus[cid] = {"text": text.strip(), "language": lang_code}
+                row_ids.append(cid)
+                if flag == 1:
+                    gold_ids.append(cid)
+            eval_queries.append({
+                "query_id": r["query_id"],
+                "language": lang_code,
+                "query": native_query,
+                "gold_answer": native_answer if native_answer not in ("", "No Answer Present.") else None,
+                "gold_chunk_ids": gold_ids,
+                "candidate_chunk_ids": row_ids,
+                "query_type": r["query_type"],
+                "has_answer": bool(gold_ids) and native_answer not in ("", "No Answer Present."),
+            })
+            n_native += 1
+
+        # --- English extraction (only for the first language processed) ---
+        if include_english:
+            eng_query = (r["Eng_Query"] or "").strip()
+            eng_answer = (r["Eng_Answer"] or "").strip()
+            eng_passages = r["eng_passages"] or []
+
+            if eng_query and eng_passages:
+                gold_ids, row_ids = [], []
+                for text, flag in zip(eng_passages, is_selected):
+                    if not text or not text.strip():
+                        continue
+                    cid = make_chunk_id(text)
+                    corpus[cid] = {"text": text.strip(), "language": "eng"}
+                    row_ids.append(cid)
+                    if flag == 1:
+                        gold_ids.append(cid)
+                eval_queries.append({
+                    "query_id": f"{r['query_id']}_eng",
+                    "language": "eng",
+                    "query": eng_query,
+                    "gold_answer": eng_answer if eng_answer not in ("", "No Answer Present.") else None,
+                    "gold_chunk_ids": gold_ids,
+                    "candidate_chunk_ids": row_ids,
+                    "query_type": r["query_type"],
+                    "has_answer": bool(gold_ids) and eng_answer not in ("", "No Answer Present."),
+                })
+                n_eng += 1
+
+    print(f"  [{lang_code}] native queries: {n_native}" + (f", english queries: {n_eng}" if include_english else ""))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--parquet-path", default=DEFAULT_PARQUET_PATH)
+    parser.add_argument("--languages", default="hin,ben,guj",
+                         help="Comma-separated language codes (hin,ben,guj,tam,...). English is always included automatically.")
     parser.add_argument("--n-rows", type=int, default=5000,
-                         help="Number of query rows to sample from the parquet.")
+                         help="Rows sampled PER language file.")
     parser.add_argument("--out-dir", default="data/processed")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
+    lang_codes = [c.strip() for c in args.languages.split(",") if c.strip()]
+
+    for c in lang_codes:
+        if c not in LANG_FILES:
+            raise ValueError(f"Unknown language code '{c}'. Available: {list(LANG_FILES.keys())}")
 
     con = duckdb.connect()
+    corpus = {}
+    eval_queries = []
 
-    # Pull only the English-relevant columns, sampled deterministically.
-    query = f"""
-        SELECT
-            query_id,
-            Eng_Query,
-            Eng_Answer,
-            query_type,
-            passages.English_passages   AS eng_passages,
-            passages.is_selected        AS is_selected
-        FROM read_parquet('{args.parquet_path}')
-        USING SAMPLE {args.n_rows} (reservoir, {args.seed})
-    """
-    rows = con.execute(query).fetchall()
-    col_names = [d[0] for d in con.description]
+    print(f"Ingesting languages: {lang_codes} + eng (from {lang_codes[0]}'s file), {args.n_rows} rows each")
+    for i, lang_code in enumerate(lang_codes):
+        ingest_language(con, lang_code, args.n_rows, args.seed, corpus, eval_queries,
+                         include_english=(i == 0))
 
-    corpus = {}          # chunk_id -> passage text
-    eval_queries = []     # list of dicts
-
-    skipped_no_gold = 0
-    skipped_no_query = 0
-
-    for row in rows:
-        r = dict(zip(col_names, row))
-
-        eng_query = (r["Eng_Query"] or "").strip()
-        eng_answer = (r["Eng_Answer"] or "").strip()
-        passages = r["eng_passages"] or []
-        is_selected = r["is_selected"] or []
-
-        if not eng_query or not passages:
-            skipped_no_query += 1
-            continue
-
-        gold_chunk_ids = []
-        row_chunk_ids = []
-
-        for passage_text, flag in zip(passages, is_selected):
-            if not passage_text or not passage_text.strip():
-                continue
-            cid = make_chunk_id(passage_text)
-            corpus[cid] = passage_text.strip()
-            row_chunk_ids.append(cid)
-            if flag == 1:
-                gold_chunk_ids.append(cid)
-
-        if not gold_chunk_ids:
-            # No passage marked as gold for this query (e.g. "No Answer
-            # Present." rows) — still useful for guardrail testing later
-            # (these are exactly the queries that SHOULD trigger a
-            # "not enough information" refusal), so we keep them but
-            # tag them explicitly.
-            skipped_no_gold += 1
-
-        eval_queries.append({
-            "query_id": r["query_id"],
-            "query": eng_query,
-            "gold_answer": eng_answer if eng_answer != "No Answer Present." else None,
-            "gold_chunk_ids": gold_chunk_ids,
-            "candidate_chunk_ids": row_chunk_ids,
-            "query_type": r["query_type"],
-            "has_answer": bool(gold_chunk_ids) and eng_answer != "No Answer Present.",
-        })
-
-    # Write corpus.jsonl
     corpus_path = os.path.join(args.out_dir, "corpus.jsonl")
     with open(corpus_path, "w", encoding="utf-8") as f:
-        for cid, text in corpus.items():
-            f.write(json.dumps({"chunk_id": cid, "text": text}, ensure_ascii=False) + "\n")
+        for cid, entry in corpus.items():
+            f.write(json.dumps({"chunk_id": cid, "text": entry["text"], "language": entry["language"]}, ensure_ascii=False) + "\n")
 
-    # Write eval_queries.jsonl
     eval_path = os.path.join(args.out_dir, "eval_queries.jsonl")
     with open(eval_path, "w", encoding="utf-8") as f:
         for eq in eval_queries:
             f.write(json.dumps(eq, ensure_ascii=False) + "\n")
 
-    print(f"Sampled rows:              {len(rows)}")
-    print(f"Skipped (no query/passages): {skipped_no_query}")
-    print(f"Rows with no gold passage:  {skipped_no_gold}  (kept, useful for refusal testing)")
-    print(f"Unique passages in corpus:  {len(corpus)}")
-    print(f"Eval queries written:       {len(eval_queries)}")
+    from collections import Counter
+    lang_counts = Counter(e["language"] for e in corpus.values())
+
+    print(f"\nUnique passages in corpus: {len(corpus)}")
+    for lang, count in lang_counts.items():
+        print(f"  {lang}: {count} passages")
+    print(f"Eval queries written: {len(eval_queries)}")
     print(f"-> {corpus_path}")
     print(f"-> {eval_path}")
 

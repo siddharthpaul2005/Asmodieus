@@ -7,3 +7,10 @@ numpy
 fastapi
 uvicorn
 httpx
+
+# Chunking / Embedding / Retrieval
+sentence-transformers
+hnswlib
+rank_bm25
+
+torch 

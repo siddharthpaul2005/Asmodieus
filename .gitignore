@@ -4,5 +4,6 @@ __pycache__/
 *.pyc
 data/raw/
 *.parquet
+data/processed/
 .env
 "@ | Out-File -Encoding utf8 .gitignore
