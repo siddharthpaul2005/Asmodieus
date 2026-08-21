@@ -254,7 +254,7 @@ const App = () => {
 
   // Trigger pipeline when transcription finalises
   useEffect(() => {
-    if (uiState === 'ready' && transcript.trim().length > 0 && !answer && !guardrailResult) {
+    if (uiState === 'ready' && transcript.trim().length > 0 && !answer && !guardrailResult && !transcript.startsWith('[Error:')) {
       processQuery(transcript);
     }
   }, [uiState, transcript, answer, guardrailResult]);
@@ -318,8 +318,8 @@ const App = () => {
           'Based on the retrieved context, this signifies a potential risk pattern originating from the subnet. We recommend isolating the affected sector and initiating automated containment protocols immediately.',
           setAnswer, 25
         );
-      }, 1800);
-    }, 1200);
+      }, 500);
+    }, 300);
   };
 
   const resetUI = () => {
@@ -349,7 +349,10 @@ const App = () => {
   };
 
   const handleMicClick = () => {
-    if (uiState === 'listening') { stopRecording(); resetUI(); }
+    if (uiState === 'listening' || uiState === 'transcribing') { 
+      stopRecording(); 
+      setUiState('ready'); 
+    }
     else { resetUI(); startRecording(); }
   };
 
@@ -425,6 +428,23 @@ const App = () => {
                 {isBlocked ? <Shield size={32} /> : <Mic size={32} />}
               </button>
             </div>
+            
+            {(uiState === 'listening' || uiState === 'transcribing') && (
+              <div style={{
+                position: 'absolute',
+                right: '-110px',
+                color: 'var(--accent)',
+                fontFamily: 'var(--font-mono)',
+                fontSize: '0.75rem',
+                animation: 'pulse-opacity 1.5s infinite alternate',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px'
+              }}>
+                <span style={{ fontSize: '1.2rem', lineHeight: 1 }}>←</span>
+                click to stop
+              </div>
+            )}
           </div>
 
           <form onSubmit={handleTextSubmit} className="text-input-form" style={{ width: '100%', maxWidth: '400px', display: 'flex', justifyContent: 'center', marginBottom: '2rem' }}>
@@ -438,7 +458,7 @@ const App = () => {
               style={{
                 width: '100%',
                 padding: '12px 20px',
-                borderRadius: '30px',
+                borderRadius: '8px',
                 border: '1px solid var(--glass-border)',
                 background: 'rgba(20, 30, 25, 0.4)',
                 color: 'white',
